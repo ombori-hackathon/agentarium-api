@@ -7,6 +7,7 @@ Files are positioned around their parent folders.
 """
 
 import math
+import random
 from collections import defaultdict
 
 from app.schemas.filesystem import Position, Folder, File, FilesystemLayout
@@ -70,52 +71,88 @@ def calculate_folder_position(
 def calculate_file_position(
     parent_position: Position,
     file_index: int,
-    total_files_in_folder: int
+    total_files_in_folder: int,
+    seed: int
 ) -> Position:
     """
-    Calculate position for a file around its parent folder.
-
-    Files are positioned in a circle around their parent folder.
+    Calculate organic file position around parent folder.
+    Uses deterministic randomness based on seed (hash of file path).
 
     Args:
         parent_position: Position of the parent folder
         file_index: Index of this file among siblings
         total_files_in_folder: Total number of files in the folder
+        seed: Seed for deterministic randomness
 
     Returns:
         Position: 3D position for the file
     """
-    # Calculate angle for circular distribution around parent
-    angle = file_index * (2 * math.pi / total_files_in_folder)
+    # Set random seed for deterministic positioning
+    random.seed(seed)
 
-    # Fixed radius around parent folder
-    file_radius = 3.0
+    # Calculate angle with jitter for organic look
+    angle = file_index * (2 * math.pi / max(total_files_in_folder, 1)) + random.uniform(-0.3, 0.3)
+
+    # Radius with slight variation
+    radius = 3.0 + random.uniform(-1.0, 1.0)
 
     # Calculate offset from parent
-    x_offset = math.cos(angle) * file_radius
-    z_offset = math.sin(angle) * file_radius
+    x_offset = math.cos(angle) * radius
+    z_offset = math.sin(angle) * radius
 
-    # Position file on the ground (same level as folders)
+    # Y position with slight variation
+    y_position = random.uniform(0.3, 0.7)
+
     return Position(
         x=parent_position.x + x_offset,
-        y=0.5,  # Slightly above ground for visibility
+        y=y_position,
         z=parent_position.z + z_offset
     )
 
 
-def calculate_folder_height(file_count: int) -> float:
+def calculate_total_contents(
+    folder_path: str,
+    folder_children: dict[str, list[Folder]],
+    files_by_folder: dict[str, list[File]]
+) -> int:
     """
-    Calculate the height (size) of a folder pyramid based on file count.
-
-    Formula: height = 2.0 + log(file_count + 1)
+    Calculate total files + subfolders recursively.
 
     Args:
-        file_count: Number of files in the folder
+        folder_path: Path of the folder to calculate for
+        folder_children: Map of folder paths to their child folders
+        files_by_folder: Map of folder paths to their files
 
     Returns:
-        float: Height value for rendering the pyramid
+        int: Total count of all files and subfolders recursively
     """
-    return 2.0 + math.log(file_count + 1)
+    direct_files = len(files_by_folder.get(folder_path, []))
+    children = folder_children.get(folder_path, [])
+    recursive_total = direct_files + len(children)
+
+    for child in children:
+        recursive_total += calculate_total_contents(child.path, folder_children, files_by_folder)
+
+    return recursive_total
+
+
+def calculate_folder_height(total_contents: int, max_contents: int) -> float:
+    """
+    Calculate height based on total contents.
+    Range: 2.0 (empty) to 10.0 (root/largest)
+    Uses logarithmic scale for visual balance.
+
+    Args:
+        total_contents: Total recursive count of files + folders
+        max_contents: Maximum total_contents value (typically root folder)
+
+    Returns:
+        float: Height value for rendering the pyramid (2.0 to 10.0)
+    """
+    if max_contents <= 0:
+        return 2.0
+    normalized = math.log(total_contents + 1) / math.log(max_contents + 1)
+    return 2.0 + 8.0 * normalized
 
 
 def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout:
@@ -146,6 +183,21 @@ def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout
             parent_path = layout.root
         folder_children[parent_path].append(folder)
 
+    # Group files by parent folder (needed for total_contents calculation)
+    files_by_folder: dict[str, list[File]] = defaultdict(list)
+    for file in layout.files:
+        files_by_folder[file.folder].append(file)
+
+    # Calculate total_contents for all folders
+    folder_total_contents: dict[str, int] = {}
+    for folder in layout.folders:
+        folder_total_contents[folder.path] = calculate_total_contents(
+            folder.path, folder_children, files_by_folder
+        )
+
+    # Find max_contents for logarithmic height calculation
+    max_contents = max(folder_total_contents.values()) if folder_total_contents else 1
+
     # Calculate positions depth-first
     positioned_folders: list[Folder] = []
     folder_positions: dict[str, Position] = {}  # path -> position mapping
@@ -153,7 +205,7 @@ def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout
     # Add root position for files in root directory
     folder_positions[layout.root] = Position(x=0.0, y=0.0, z=0.0)
 
-    def position_folder_and_children(folder: Folder, parent_position: Position, sibling_index: int, sibling_count: int):
+    def position_folder_and_children(folder: Folder, parent_position: Position, sibling_index: int, sibling_count: int, parent_folder_path: str):
         """Recursively position a folder and its children"""
         # Calculate elevation
         elevation = calculate_elevation(folder.depth, folder.file_count)
@@ -178,39 +230,37 @@ def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout
                 z=parent_position.z + math.sin(angle) * cluster_radius
             )
 
-        # Calculate height for rendering
-        height = calculate_folder_height(folder.file_count)
+        # Get total contents and calculate height using logarithmic formula
+        total_contents = folder_total_contents.get(folder.path, 0)
+        height = calculate_folder_height(total_contents, max_contents)
 
         # Store position for file placement and children
         folder_positions[folder.path] = position
 
-        # Create positioned folder
+        # Create positioned folder with new fields
         positioned_folder = Folder(
             path=folder.path,
             name=folder.name,
             depth=folder.depth,
             file_count=folder.file_count,
             position=position,
-            height=height
+            height=height,
+            total_contents=total_contents,
+            parent_path=parent_folder_path if parent_folder_path != layout.root else None
         )
         positioned_folders.append(positioned_folder)
 
         # Recursively position children
         children = folder_children.get(folder.path, [])
         for child_index, child in enumerate(children):
-            position_folder_and_children(child, position, child_index, len(children))
+            position_folder_and_children(child, position, child_index, len(children), folder.path)
 
     # Start with top-level folders (depth 1)
     top_level = folder_children.get(layout.root, [])
     for index, folder in enumerate(top_level):
-        position_folder_and_children(folder, folder_positions[layout.root], index, len(top_level))
+        position_folder_and_children(folder, folder_positions[layout.root], index, len(top_level), layout.root)
 
-    # Group files by parent folder
-    files_by_folder: dict[str, list[File]] = defaultdict(list)
-    for file in layout.files:
-        files_by_folder[file.folder].append(file)
-
-    # Calculate positions for files
+    # Calculate positions for files using organic scattering
     positioned_files: list[File] = []
     for folder_path, files in files_by_folder.items():
         # Get parent folder position
@@ -222,11 +272,15 @@ def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout
 
         total_files = len(files)
         for index, file in enumerate(files):
-            # Calculate position around parent
+            # Use file path hash as seed for deterministic randomness
+            seed = hash(file.path)
+
+            # Calculate position around parent with organic scattering
             position = calculate_file_position(
                 parent_position=parent_position,
                 file_index=index,
-                total_files_in_folder=total_files
+                total_files_in_folder=total_files,
+                seed=seed
             )
 
             # Create updated file with position
