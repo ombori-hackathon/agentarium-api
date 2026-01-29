@@ -121,10 +121,10 @@ def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout
     """
     Calculate positions for all folders and files in a filesystem layout.
 
-    This function:
-    1. Groups folders by depth
-    2. Calculates positions for each folder using spiral layout
-    3. Calculates positions for each file around its parent folder
+    This function implements mountain range clustering:
+    1. Top-level folders (depth 1) form a ring around origin
+    2. Nested folders (depth 2+) cluster near their parent (mountain ranges)
+    3. Deeper nesting creates higher elevation (mountain peaks)
 
     Args:
         layout: Filesystem layout without positions
@@ -132,50 +132,77 @@ def calculate_positions_for_layout(layout: FilesystemLayout) -> FilesystemLayout
     Returns:
         FilesystemLayout: Layout with positions calculated for all folders and files
     """
-    # Group folders by depth for spiral layout
-    folders_by_depth: dict[int, list[Folder]] = defaultdict(list)
-    for folder in layout.folders:
-        folders_by_depth[folder.depth].append(folder)
+    # Build parent-child relationships
+    folder_children: dict[str, list[Folder]] = defaultdict(list)
+    folders_by_path: dict[str, Folder] = {}
 
-    # Calculate positions for folders
+    for folder in layout.folders:
+        folders_by_path[folder.path] = folder
+
+        # Determine parent path
+        parent_path = "/".join(folder.path.rsplit("/", 1)[:-1])
+        if not parent_path:
+            parent_path = layout.root
+        folder_children[parent_path].append(folder)
+
+    # Calculate positions depth-first
     positioned_folders: list[Folder] = []
     folder_positions: dict[str, Position] = {}  # path -> position mapping
 
     # Add root position for files in root directory
     folder_positions[layout.root] = Position(x=0.0, y=0.0, z=0.0)
 
-    for depth in sorted(folders_by_depth.keys()):
-        folders_at_depth = folders_by_depth[depth]
-        total_at_depth = len(folders_at_depth)
+    def position_folder_and_children(folder: Folder, parent_position: Position, sibling_index: int, sibling_count: int):
+        """Recursively position a folder and its children"""
+        # Calculate elevation
+        elevation = calculate_elevation(folder.depth, folder.file_count)
 
-        for index, folder in enumerate(folders_at_depth):
-            # Calculate elevation
-            elevation = calculate_elevation(folder.depth, folder.file_count)
-
-            # Calculate position
-            position = calculate_folder_position(
-                depth=folder.depth,
-                folder_index=index,
-                total_folders_at_depth=total_at_depth,
-                elevation=elevation
+        # Calculate position based on depth
+        if folder.depth == 1:
+            # Top-level folders in circle around origin
+            angle = sibling_index * (2 * math.pi / sibling_count)
+            radius = 20.0
+            position = Position(
+                x=math.cos(angle) * radius,
+                y=elevation,
+                z=math.sin(angle) * radius
+            )
+        else:
+            # Nested folders: cluster near parent
+            angle = sibling_index * (2 * math.pi / sibling_count) if sibling_count > 0 else 0
+            cluster_radius = 5.0
+            position = Position(
+                x=parent_position.x + math.cos(angle) * cluster_radius,
+                y=elevation,
+                z=parent_position.z + math.sin(angle) * cluster_radius
             )
 
-            # Calculate height for rendering
-            height = calculate_folder_height(folder.file_count)
+        # Calculate height for rendering
+        height = calculate_folder_height(folder.file_count)
 
-            # Store position for file placement
-            folder_positions[folder.path] = position
+        # Store position for file placement and children
+        folder_positions[folder.path] = position
 
-            # Create updated folder with position and height
-            positioned_folder = Folder(
-                path=folder.path,
-                name=folder.name,
-                depth=folder.depth,
-                file_count=folder.file_count,
-                position=position,
-                height=height
-            )
-            positioned_folders.append(positioned_folder)
+        # Create positioned folder
+        positioned_folder = Folder(
+            path=folder.path,
+            name=folder.name,
+            depth=folder.depth,
+            file_count=folder.file_count,
+            position=position,
+            height=height
+        )
+        positioned_folders.append(positioned_folder)
+
+        # Recursively position children
+        children = folder_children.get(folder.path, [])
+        for child_index, child in enumerate(children):
+            position_folder_and_children(child, position, child_index, len(children))
+
+    # Start with top-level folders (depth 1)
+    top_level = folder_children.get(layout.root, [])
+    for index, folder in enumerate(top_level):
+        position_folder_and_children(folder, folder_positions[layout.root], index, len(top_level))
 
     # Group files by parent folder
     files_by_folder: dict[str, list[File]] = defaultdict(list)

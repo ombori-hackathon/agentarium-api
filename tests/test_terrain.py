@@ -154,6 +154,117 @@ class TestDeterminism:
         assert pos1.z == pos2.z
 
 
+class TestMountainClustering:
+    """Tests for mountain range clustering behavior"""
+
+    def test_nested_folders_cluster_near_parent(self):
+        """Nested folders (depth 2+) should cluster near their parent, not in separate rings"""
+        # Create a parent folder at depth 1 and two children at depth 2
+        folders = [
+            Folder(path="/src", name="src", depth=1, file_count=0),
+            Folder(path="/src/utils", name="utils", depth=2, file_count=0),
+            Folder(path="/src/models", name="models", depth=2, file_count=0),
+        ]
+
+        layout = FilesystemLayout(
+            root="/",
+            folders=folders,
+            files=[],
+            scanned_at=datetime.now(timezone.utc)
+        )
+
+        result = calculate_positions_for_layout(layout)
+
+        # Get positions
+        parent = next(f for f in result.folders if f.path == "/src")
+        child1 = next(f for f in result.folders if f.path == "/src/utils")
+        child2 = next(f for f in result.folders if f.path == "/src/models")
+
+        # Children should be NEAR parent (within cluster radius ~5.0), not far away (30+ units)
+        parent_to_child1 = math.sqrt(
+            (child1.position.x - parent.position.x)**2 +
+            (child1.position.z - parent.position.z)**2
+        )
+        parent_to_child2 = math.sqrt(
+            (child2.position.x - parent.position.x)**2 +
+            (child2.position.z - parent.position.z)**2
+        )
+
+        # Should be clustered within radius ~5.0, not scattered at radius 30
+        assert parent_to_child1 <= 6.0, f"Child1 too far from parent: {parent_to_child1}"
+        assert parent_to_child2 <= 6.0, f"Child2 too far from parent: {parent_to_child2}"
+
+        # Children should be higher than parent (mountain peak effect)
+        assert child1.position.y > parent.position.y
+        assert child2.position.y > parent.position.y
+
+    def test_depth_1_folders_form_outer_ring(self):
+        """Top-level folders (depth 1) should form a ring at radius ~20"""
+        folders = [
+            Folder(path="/src", name="src", depth=1, file_count=0),
+            Folder(path="/docs", name="docs", depth=1, file_count=0),
+            Folder(path="/tests", name="tests", depth=1, file_count=0),
+            Folder(path="/config", name="config", depth=1, file_count=0),
+        ]
+
+        layout = FilesystemLayout(
+            root="/",
+            folders=folders,
+            files=[],
+            scanned_at=datetime.now(timezone.utc)
+        )
+
+        result = calculate_positions_for_layout(layout)
+
+        # All depth 1 folders should be at radius ~20 from origin
+        for folder in result.folders:
+            distance_from_origin = math.sqrt(
+                folder.position.x**2 + folder.position.z**2
+            )
+            assert math.isclose(distance_from_origin, 20.0, rel_tol=0.1), \
+                f"{folder.name} at distance {distance_from_origin}, expected ~20"
+
+    def test_three_level_nesting_creates_mountain_peak(self):
+        """Three levels of nesting should create progressively higher elevation (mountain peak)"""
+        folders = [
+            Folder(path="/src", name="src", depth=1, file_count=0),
+            Folder(path="/src/components", name="components", depth=2, file_count=0),
+            Folder(path="/src/components/ui", name="ui", depth=3, file_count=0),
+        ]
+
+        layout = FilesystemLayout(
+            root="/",
+            folders=folders,
+            files=[],
+            scanned_at=datetime.now(timezone.utc)
+        )
+
+        result = calculate_positions_for_layout(layout)
+
+        # Get positions
+        level1 = next(f for f in result.folders if f.path == "/src")
+        level2 = next(f for f in result.folders if f.path == "/src/components")
+        level3 = next(f for f in result.folders if f.path == "/src/components/ui")
+
+        # Each level should be progressively higher
+        assert level2.position.y > level1.position.y, "Level 2 should be higher than level 1"
+        assert level3.position.y > level2.position.y, "Level 3 should be higher than level 2"
+
+        # Level 2 should cluster near level 1
+        dist_1_to_2 = math.sqrt(
+            (level2.position.x - level1.position.x)**2 +
+            (level2.position.z - level1.position.z)**2
+        )
+        assert dist_1_to_2 <= 6.0, f"Level 2 too far from level 1: {dist_1_to_2}"
+
+        # Level 3 should cluster near level 2
+        dist_2_to_3 = math.sqrt(
+            (level3.position.x - level2.position.x)**2 +
+            (level3.position.z - level2.position.z)**2
+        )
+        assert dist_2_to_3 <= 6.0, f"Level 3 too far from level 2: {dist_2_to_3}"
+
+
 class TestLayoutIntegration:
     """Tests for full layout position calculation"""
 
