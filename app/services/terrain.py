@@ -14,18 +14,19 @@ from app.schemas.filesystem import Position, Folder, File, FilesystemLayout
 
 def calculate_elevation(depth: int, file_count: int) -> float:
     """
-    Calculate elevation (y-coordinate) for a folder based on depth and file count.
+    Calculate elevation (y-coordinate) for a folder.
 
-    Formula: elevation = (depth × 3.0) + log(file_count + 1) × 2.0
+    All folders sit on the floor (y=0). Height varies by depth/file_count
+    but position is always ground level.
 
     Args:
         depth: How deep the folder is in the tree (root = 0)
         file_count: Number of files directly in the folder
 
     Returns:
-        float: Elevation value (y-coordinate)
+        float: Elevation value (y-coordinate) - always 0
     """
-    return (depth * 3.0) + math.log(file_count + 1) * 2.0
+    return 0.0
 
 
 def calculate_folder_position(
@@ -94,10 +95,10 @@ def calculate_file_position(
     x_offset = math.cos(angle) * file_radius
     z_offset = math.sin(angle) * file_radius
 
-    # Position file slightly above parent (0.5 units)
+    # Position file on the ground (same level as folders)
     return Position(
         x=parent_position.x + x_offset,
-        y=parent_position.y + 0.5,
+        y=0.5,  # Slightly above ground for visibility
         z=parent_position.z + z_offset
     )
 

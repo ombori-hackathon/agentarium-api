@@ -12,46 +12,38 @@ from datetime import datetime, timezone
 
 
 class TestElevationFormula:
-    """Tests for elevation calculation"""
+    """Tests for elevation calculation - all folders on ground level"""
 
     def test_root_folder_elevation(self):
         """Root folder (depth=0) should be at ground level"""
         elevation = calculate_elevation(depth=0, file_count=0)
         assert elevation == 0.0
 
-    def test_depth_increases_elevation(self):
-        """Deeper folders should be higher"""
+    def test_all_depths_at_ground_level(self):
+        """All folders should be at ground level (y=0) regardless of depth"""
         elev_depth_1 = calculate_elevation(depth=1, file_count=0)
         elev_depth_2 = calculate_elevation(depth=2, file_count=0)
         elev_depth_3 = calculate_elevation(depth=3, file_count=0)
 
-        assert elev_depth_1 == 3.0  # 1 * 3.0 + log(1) * 2.0 = 3.0 + 0.0 = 3.0
-        assert elev_depth_2 == 6.0  # 2 * 3.0 + log(1) * 2.0 = 6.0 + 0.0 = 6.0
-        assert elev_depth_3 == 9.0  # 3 * 3.0 + log(1) * 2.0 = 9.0 + 0.0 = 9.0
+        assert elev_depth_1 == 0.0
+        assert elev_depth_2 == 0.0
+        assert elev_depth_3 == 0.0
 
-    def test_file_count_increases_elevation(self):
-        """More files should increase elevation slightly"""
+    def test_file_count_does_not_affect_elevation(self):
+        """File count should not affect elevation - all at ground level"""
         elev_0_files = calculate_elevation(depth=1, file_count=0)
         elev_10_files = calculate_elevation(depth=1, file_count=10)
         elev_100_files = calculate_elevation(depth=1, file_count=100)
 
-        # All should be > 3.0 (base depth)
-        assert elev_0_files == 3.0
-        assert elev_10_files > elev_0_files
-        assert elev_100_files > elev_10_files
+        # All should be at ground level
+        assert elev_0_files == 0.0
+        assert elev_10_files == 0.0
+        assert elev_100_files == 0.0
 
-        # Check specific values
-        # 1 * 3.0 + log(11) * 2.0 ≈ 3.0 + 2.398 * 2.0 ≈ 7.796
-        assert math.isclose(elev_10_files, 3.0 + math.log(11) * 2.0, rel_tol=1e-5)
-
-    def test_elevation_formula_exact(self):
-        """Test exact formula: elevation = (depth × 3.0) + log(file_count + 1) × 2.0"""
-        depth = 2
-        file_count = 50
-        expected = (depth * 3.0) + math.log(file_count + 1) * 2.0
-
-        result = calculate_elevation(depth, file_count)
-        assert math.isclose(result, expected, rel_tol=1e-9)
+    def test_elevation_always_zero(self):
+        """All elevations should be 0 - items on the floor"""
+        result = calculate_elevation(depth=5, file_count=1000)
+        assert result == 0.0
 
 
 class TestCoordinateCalculation:
@@ -113,8 +105,8 @@ class TestCoordinateCalculation:
             assert math.isclose(actual_angle, expected_angle, rel_tol=1e-5)
 
     def test_file_positions_around_parent(self):
-        """Files should be positioned around their parent folder"""
-        parent_pos = Position(x=10.0, y=5.0, z=20.0)
+        """Files should be positioned around their parent folder on the floor"""
+        parent_pos = Position(x=10.0, y=0.0, z=20.0)
         file_radius = 3.0
 
         # Test 4 files around parent
@@ -125,9 +117,9 @@ class TestCoordinateCalculation:
             calculate_file_position(parent_pos, 3, 4),
         ]
 
-        # All files should be 0.5 units above parent
+        # All files should be at fixed height 0.5 (on the floor)
         for pos in positions:
-            assert pos.y == parent_pos.y + 0.5
+            assert pos.y == 0.5
 
         # All files should be ~3 units from parent (x,z plane)
         for pos in positions:
@@ -155,7 +147,7 @@ class TestDeterminism:
 
 
 class TestMountainClustering:
-    """Tests for mountain range clustering behavior"""
+    """Tests for horizontal clustering behavior - all items on floor"""
 
     def test_nested_folders_cluster_near_parent(self):
         """Nested folders (depth 2+) should cluster near their parent, not in separate rings"""
@@ -194,9 +186,10 @@ class TestMountainClustering:
         assert parent_to_child1 <= 6.0, f"Child1 too far from parent: {parent_to_child1}"
         assert parent_to_child2 <= 6.0, f"Child2 too far from parent: {parent_to_child2}"
 
-        # Children should be higher than parent (mountain peak effect)
-        assert child1.position.y > parent.position.y
-        assert child2.position.y > parent.position.y
+        # All folders should be at ground level
+        assert parent.position.y == 0.0
+        assert child1.position.y == 0.0
+        assert child2.position.y == 0.0
 
     def test_depth_1_folders_form_outer_ring(self):
         """Top-level folders (depth 1) should form a ring at radius ~20"""
@@ -224,8 +217,8 @@ class TestMountainClustering:
             assert math.isclose(distance_from_origin, 20.0, rel_tol=0.1), \
                 f"{folder.name} at distance {distance_from_origin}, expected ~20"
 
-    def test_three_level_nesting_creates_mountain_peak(self):
-        """Three levels of nesting should create progressively higher elevation (mountain peak)"""
+    def test_three_level_nesting_clusters_horizontally(self):
+        """Three levels of nesting should cluster horizontally near each other"""
         folders = [
             Folder(path="/src", name="src", depth=1, file_count=0),
             Folder(path="/src/components", name="components", depth=2, file_count=0),
@@ -246,9 +239,10 @@ class TestMountainClustering:
         level2 = next(f for f in result.folders if f.path == "/src/components")
         level3 = next(f for f in result.folders if f.path == "/src/components/ui")
 
-        # Each level should be progressively higher
-        assert level2.position.y > level1.position.y, "Level 2 should be higher than level 1"
-        assert level3.position.y > level2.position.y, "Level 3 should be higher than level 2"
+        # All should be at ground level
+        assert level1.position.y == 0.0
+        assert level2.position.y == 0.0
+        assert level3.position.y == 0.0
 
         # Level 2 should cluster near level 1
         dist_1_to_2 = math.sqrt(
@@ -323,7 +317,7 @@ class TestLayoutIntegration:
             assert folder.depth > 0
 
     def test_files_grouped_by_folder(self):
-        """Files should be positioned around their parent folder"""
+        """Files should be positioned around their parent folder on the floor"""
         folders = [
             Folder(path="/src", name="src", depth=1, file_count=2),
         ]
@@ -354,5 +348,5 @@ class TestLayoutIntegration:
             # Files should be ~3 units away
             assert math.isclose(distance, 3.0, rel_tol=1e-5)
 
-            # Files should be 0.5 units above parent
-            assert file.position.y == parent_pos.y + 0.5
+            # Files should be at fixed height 0.5 (on the floor)
+            assert file.position.y == 0.5
