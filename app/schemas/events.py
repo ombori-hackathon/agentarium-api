@@ -42,3 +42,19 @@ class AgentDespawn(BaseModel):
     """Agent despawn event"""
     type: Literal["agent_despawn"] = "agent_despawn"
     agent_id: str
+
+
+class TerrainLoading(BaseModel):
+    """Terrain loading event - sent when starting to build terrain"""
+    type: Literal["terrain_loading"] = "terrain_loading"
+    session_id: str
+    cwd: str
+    message: str = "Creating world..."
+
+
+class TerrainComplete(BaseModel):
+    """Terrain complete event - sent when terrain is fully loaded"""
+    type: Literal["terrain_complete"] = "terrain_complete"
+    session_id: str
+    folder_count: int
+    file_count: int

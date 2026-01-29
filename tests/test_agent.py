@@ -2,12 +2,15 @@
 Tests for agent state management and event processing.
 """
 
+import os
+import tempfile
 import pytest
 from app.services.agent import (
     AgentService,
     AgentState,
     generate_thought,
-    extract_file_path
+    extract_file_path,
+    scan_filesystem
 )
 from app.schemas.filesystem import Position, FilesystemLayout, File, Folder
 from app.schemas.events import HookEvent
@@ -255,8 +258,10 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
+        assert len(messages) == 1
+        message_type, message_data = messages[0]
         assert message_type == "agent_event"
         assert message_data is not None
         assert message_data["agent_id"] == "session-123"
@@ -277,8 +282,10 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
+        assert len(messages) == 1
+        message_type, message_data = messages[0]
         assert message_type == "agent_event"
         assert message_data is not None
         assert message_data["agent_id"] == "session-456"
@@ -300,8 +307,10 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
+        assert len(messages) == 1
+        message_type, message_data = messages[0]
         # Agent should stay in place for unknown files
         assert message_type == "agent_event"
         assert message_data is not None
@@ -357,16 +366,18 @@ class TestAgentService:
         assert agent_service.agents["session-1"].thought == "Running: test1"
         assert agent_service.agents["session-2"].thought == "Running: test2"
 
-    def test_session_start_event(self, agent_service):
-        """Test SessionStart event creates agent at origin"""
+    def test_session_start_event_without_cwd(self, agent_service):
+        """Test SessionStart event without cwd just spawns agent"""
         event = HookEvent(
             session_id="session-start",
-            hook_event_name="SessionStart",
-            cwd="/test"
+            hook_event_name="SessionStart"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
+        # Should only have agent_spawn
+        assert len(messages) == 1
+        message_type, message_data = messages[0]
         assert message_type == "agent_spawn"
         assert message_data["agent_id"] == "session-start"
         assert message_data["position"]["x"] == 0.0
@@ -385,8 +396,10 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
+        assert len(messages) == 1
+        message_type, message_data = messages[0]
         assert message_type == "agent_despawn"
         assert message_data["agent_id"] == "session-end"
         assert "session-end" not in agent_service.agents
@@ -401,8 +414,10 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
+        assert len(messages) == 1
+        message_type, _ = messages[0]
         assert message_type == "agent_despawn"
         assert "session-stop" not in agent_service.agents
 
@@ -426,8 +441,10 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event_post)
+        messages = agent_service.process_hook_event(event_post)
 
+        assert len(messages) == 1
+        message_type, message_data = messages[0]
         assert message_type == "agent_event"
         assert message_data["event_type"] == "idle"
         assert message_data["tool_name"] == "Read"
@@ -440,7 +457,208 @@ class TestAgentService:
             cwd="/test"
         )
 
-        message_type, message_data = agent_service.process_hook_event(event)
+        messages = agent_service.process_hook_event(event)
 
-        assert message_type is None
-        assert message_data is None
+        assert len(messages) == 0
+
+
+class TestSessionStartWithTerrain:
+    """Tests for SessionStart with auto-terrain loading"""
+
+    @pytest.fixture
+    def temp_project(self):
+        """Create a temporary project directory structure"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create some folders and files
+            src_dir = os.path.join(tmpdir, "src")
+            os.makedirs(src_dir)
+
+            # Create some files
+            with open(os.path.join(tmpdir, "README.md"), "w") as f:
+                f.write("# Test Project")
+
+            with open(os.path.join(src_dir, "index.ts"), "w") as f:
+                f.write("console.log('hello');")
+
+            with open(os.path.join(src_dir, "app.ts"), "w") as f:
+                f.write("export default {};")
+
+            yield tmpdir
+
+    def test_session_start_with_cwd_loads_terrain(self, temp_project):
+        """Test SessionStart with cwd triggers terrain loading"""
+        agent_service = AgentService()
+
+        event = HookEvent(
+            session_id="session-terrain",
+            hook_event_name="SessionStart",
+            cwd=temp_project
+        )
+
+        messages = agent_service.process_hook_event(event)
+
+        # Should have: terrain_loading, filesystem, terrain_complete, agent_spawn
+        assert len(messages) == 4
+
+        # Check message types in order
+        assert messages[0][0] == "terrain_loading"
+        assert messages[0][1]["cwd"] == temp_project
+        assert messages[0][1]["message"] == "Creating world..."
+
+        assert messages[1][0] == "filesystem"
+        assert messages[1][1]["root"] == temp_project
+
+        assert messages[2][0] == "terrain_complete"
+        assert messages[2][1]["folder_count"] == 1  # src folder
+        assert messages[2][1]["file_count"] == 3  # README.md, index.ts, app.ts
+
+        assert messages[3][0] == "agent_spawn"
+        assert messages[3][1]["agent_id"] == "session-terrain"
+
+    def test_session_start_sets_current_cwd(self, temp_project):
+        """Test SessionStart updates current_cwd"""
+        agent_service = AgentService()
+
+        event = HookEvent(
+            session_id="session-cwd",
+            hook_event_name="SessionStart",
+            cwd=temp_project
+        )
+
+        agent_service.process_hook_event(event)
+
+        assert agent_service.current_cwd == temp_project
+        assert agent_service.terrain_layout is not None
+
+    def test_session_start_same_cwd_no_reload(self, temp_project):
+        """Test SessionStart with same cwd doesn't reload terrain"""
+        agent_service = AgentService()
+
+        # First session
+        event1 = HookEvent(
+            session_id="session-1",
+            hook_event_name="SessionStart",
+            cwd=temp_project
+        )
+        messages1 = agent_service.process_hook_event(event1)
+        assert len(messages1) == 4  # Full terrain loading
+
+        # Second session with same cwd
+        event2 = HookEvent(
+            session_id="session-2",
+            hook_event_name="SessionStart",
+            cwd=temp_project
+        )
+        messages2 = agent_service.process_hook_event(event2)
+
+        # Should only have agent_spawn (no terrain reload)
+        assert len(messages2) == 1
+        assert messages2[0][0] == "agent_spawn"
+
+    def test_session_start_different_cwd_reloads_terrain(self, temp_project):
+        """Test SessionStart with different cwd reloads terrain"""
+        agent_service = AgentService()
+
+        # First session
+        event1 = HookEvent(
+            session_id="session-1",
+            hook_event_name="SessionStart",
+            cwd=temp_project
+        )
+        agent_service.process_hook_event(event1)
+
+        # Create another temp directory
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            os.makedirs(os.path.join(tmpdir2, "lib"))
+
+            event2 = HookEvent(
+                session_id="session-2",
+                hook_event_name="SessionStart",
+                cwd=tmpdir2
+            )
+            messages2 = agent_service.process_hook_event(event2)
+
+            # Should have full terrain loading for new cwd
+            assert len(messages2) == 4
+            assert messages2[0][0] == "terrain_loading"
+            assert messages2[1][0] == "filesystem"
+            assert agent_service.current_cwd == tmpdir2
+
+    def test_session_start_invalid_cwd_still_spawns_agent(self, agent_service):
+        """Test SessionStart with invalid cwd still spawns agent"""
+        event = HookEvent(
+            session_id="session-invalid",
+            hook_event_name="SessionStart",
+            cwd="/nonexistent/path/that/does/not/exist"
+        )
+
+        messages = agent_service.process_hook_event(event)
+
+        # Should have terrain_loading (which starts) then agent_spawn
+        # filesystem scanning fails but agent still spawns
+        assert any(msg[0] == "agent_spawn" for msg in messages)
+        assert "session-invalid" in agent_service.agents
+
+
+class TestScanFilesystem:
+    """Tests for filesystem scanning function"""
+
+    @pytest.fixture
+    def temp_project(self):
+        """Create a temporary project directory structure"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_dir = os.path.join(tmpdir, "src")
+            os.makedirs(src_dir)
+
+            with open(os.path.join(tmpdir, "README.md"), "w") as f:
+                f.write("# Test")
+
+            with open(os.path.join(src_dir, "index.ts"), "w") as f:
+                f.write("test")
+
+            yield tmpdir
+
+    def test_scan_filesystem_returns_layout(self, temp_project):
+        """Test scan_filesystem returns proper layout"""
+        layout = scan_filesystem(temp_project)
+
+        assert layout.root == temp_project
+        assert len(layout.folders) == 1  # src
+        assert len(layout.files) == 2  # README.md, index.ts
+
+    def test_scan_filesystem_calculates_positions(self, temp_project):
+        """Test scan_filesystem calculates positions"""
+        layout = scan_filesystem(temp_project)
+
+        # Check that positions are calculated
+        for folder in layout.folders:
+            assert folder.position is not None
+            assert folder.height is not None
+
+        for file in layout.files:
+            assert file.position is not None
+
+    def test_scan_filesystem_excludes_node_modules(self):
+        """Test scan_filesystem excludes node_modules"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create node_modules directory
+            node_modules = os.path.join(tmpdir, "node_modules")
+            os.makedirs(node_modules)
+            with open(os.path.join(node_modules, "package.json"), "w") as f:
+                f.write("{}")
+
+            # Create src directory
+            src_dir = os.path.join(tmpdir, "src")
+            os.makedirs(src_dir)
+
+            layout = scan_filesystem(tmpdir)
+
+            # Should not include node_modules
+            folder_names = [f.name for f in layout.folders]
+            assert "node_modules" not in folder_names
+            assert "src" in folder_names
+
+    def test_scan_filesystem_invalid_path_raises(self):
+        """Test scan_filesystem raises for invalid path"""
+        with pytest.raises(ValueError):
+            scan_filesystem("/nonexistent/path")
