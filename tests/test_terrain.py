@@ -105,28 +105,27 @@ class TestCoordinateCalculation:
             assert math.isclose(actual_angle, expected_angle, rel_tol=1e-5)
 
     def test_file_positions_around_parent(self):
-        """Files should be positioned around their parent folder on the floor"""
+        """Files should be positioned around their parent folder with organic scattering"""
         parent_pos = Position(x=10.0, y=0.0, z=20.0)
-        file_radius = 3.0
 
-        # Test 4 files around parent
+        # Test 4 files around parent with different seeds
         positions = [
-            calculate_file_position(parent_pos, 0, 4),
-            calculate_file_position(parent_pos, 1, 4),
-            calculate_file_position(parent_pos, 2, 4),
-            calculate_file_position(parent_pos, 3, 4),
+            calculate_file_position(parent_pos, 0, 4, seed=1),
+            calculate_file_position(parent_pos, 1, 4, seed=2),
+            calculate_file_position(parent_pos, 2, 4, seed=3),
+            calculate_file_position(parent_pos, 3, 4, seed=4),
         ]
 
-        # All files should be at fixed height 0.5 (on the floor)
+        # All files should be at height between 0.3 and 0.7
         for pos in positions:
-            assert pos.y == 0.5
+            assert 0.3 <= pos.y <= 0.7
 
-        # All files should be ~3 units from parent (x,z plane)
+        # All files should be approximately 2-4 units from parent (3.0 +/- 1.0)
         for pos in positions:
             dx = pos.x - parent_pos.x
             dz = pos.z - parent_pos.z
             distance = math.sqrt(dx**2 + dz**2)
-            assert math.isclose(distance, file_radius, rel_tol=1e-5)
+            assert 2.0 <= distance <= 4.0
 
 
 class TestDeterminism:
@@ -339,14 +338,14 @@ class TestLayoutIntegration:
         parent_folder = result.folders[0]
         parent_pos = parent_folder.position
 
-        # Check files are near parent
+        # Check files are near parent with organic scattering
         for file in result.files:
             dx = file.position.x - parent_pos.x
             dz = file.position.z - parent_pos.z
             distance = math.sqrt(dx**2 + dz**2)
 
-            # Files should be ~3 units away
-            assert math.isclose(distance, 3.0, rel_tol=1e-5)
+            # Files should be approximately 2-4 units away (3.0 +/- 1.0)
+            assert 2.0 <= distance <= 4.0
 
-            # Files should be at fixed height 0.5 (on the floor)
-            assert file.position.y == 0.5
+            # Files should be at height between 0.3 and 0.7
+            assert 0.3 <= file.position.y <= 0.7

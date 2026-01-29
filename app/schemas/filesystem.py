@@ -18,6 +18,8 @@ class Folder(BaseModel):
     file_count: int
     position: Optional[Position] = None
     height: Optional[float] = None
+    total_contents: int = 0
+    parent_path: Optional[str] = None
 
 
 class File(BaseModel):
