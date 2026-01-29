@@ -9,6 +9,36 @@ from app.services.agent import agent_service
 
 router = APIRouter(prefix="/api/filesystem", tags=["filesystem"])
 
+# Directories to exclude from filesystem scanning for performance
+EXCLUDED_DIRS = {
+    # Package managers
+    'node_modules', '.pnpm', 'bower_components', 'vendor', 'packages',
+
+    # Version control
+    '.git', '.svn', '.hg',
+
+    # Build outputs
+    'dist', 'build', 'out', 'target', '.next', '.nuxt', '.output',
+
+    # Caches
+    '.cache', '__pycache__', '.pytest_cache', '.mypy_cache', '.tox',
+
+    # Virtual environments
+    '.venv', 'venv', 'env', '.env',
+
+    # IDE/Editor
+    '.idea', '.vscode',
+
+    # Logs/temp
+    'logs', 'tmp', 'temp', '.tmp',
+
+    # Coverage/reports
+    'coverage', '.nyc_output', 'htmlcov',
+}
+
+# Maximum depth to traverse (prevents deep recursion in nested projects)
+MAX_DEPTH = 5
+
 
 @router.get("", response_model=FilesystemLayout)
 async def get_filesystem(path: str = Query(..., description="Root path to scan")):
@@ -35,10 +65,17 @@ async def get_filesystem(path: str = Query(..., description="Root path to scan")
         current_path = Path(dirpath)
         current_depth = len(current_path.parts) - root_depth
 
+        # Filter out excluded directories (modifying in-place affects os.walk traversal)
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+
+        # Stop descending if we've reached max depth (but still process this folder)
+        if current_depth >= MAX_DEPTH:
+            dirnames.clear()  # Don't descend further
+
         # Add subdirectories as folders (skip root itself)
         if current_path != root_path:
-            # Count files in this directory only (not recursive)
-            file_count = len([f for f in current_path.iterdir() if f.is_file()])
+            # Count files using filenames from os.walk (no extra filesystem call)
+            file_count = len(filenames)
 
             folders.append(Folder(
                 path=str(current_path),
