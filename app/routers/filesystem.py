@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.filesystem import FilesystemLayout, Folder, File
+from app.services.terrain import calculate_positions_for_layout
 
 router = APIRouter(prefix="/api/filesystem", tags=["filesystem"])
 
@@ -61,9 +62,15 @@ async def get_filesystem(path: str = Query(..., description="Root path to scan")
                 # Skip files we can't access
                 continue
 
-    return FilesystemLayout(
+    # Create initial layout without positions
+    layout = FilesystemLayout(
         root=str(root_path),
         folders=folders,
         files=files,
         scanned_at=datetime.now(timezone.utc)
     )
+
+    # Calculate positions for all folders and files
+    layout_with_positions = calculate_positions_for_layout(layout)
+
+    return layout_with_positions
