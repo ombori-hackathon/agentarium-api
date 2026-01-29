@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.filesystem import FilesystemLayout, Folder, File
 from app.services.terrain import calculate_positions_for_layout
+from app.services.agent import agent_service
 
 router = APIRouter(prefix="/api/filesystem", tags=["filesystem"])
 
@@ -72,5 +73,8 @@ async def get_filesystem(path: str = Query(..., description="Root path to scan")
 
     # Calculate positions for all folders and files
     layout_with_positions = calculate_positions_for_layout(layout)
+
+    # Store terrain layout in agent service for position lookups
+    agent_service.set_terrain_layout(layout_with_positions)
 
     return layout_with_positions
