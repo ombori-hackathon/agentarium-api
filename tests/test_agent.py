@@ -152,6 +152,21 @@ class TestFilePathExtraction:
         path = extract_file_path("Read", {})
         assert path is None
 
+    def test_extract_from_grep(self):
+        """Test extracting path from Grep tool"""
+        path = extract_file_path("Grep", {"pattern": "TODO", "path": "/src"})
+        assert path == "/src"
+
+    def test_extract_from_glob(self):
+        """Test extracting path from Glob tool"""
+        path = extract_file_path("Glob", {"pattern": "*.ts", "path": "/src"})
+        assert path == "/src"
+
+    def test_bash_returns_none(self):
+        """Test Bash tool returns None (no path extraction)"""
+        path = extract_file_path("Bash", {"command": "cat file.txt"})
+        assert path is None
+
 
 class TestAgentService:
     """Tests for AgentService"""
@@ -212,6 +227,22 @@ class TestAgentService:
         assert state1 is state2
         assert state2.thought == "Test thought"
 
+    def test_remove_agent(self, agent_service):
+        """Test removing agent state"""
+        # Create agent
+        agent_service.get_or_create_agent("session-123")
+        assert "session-123" in agent_service.agents
+
+        # Remove it
+        result = agent_service.remove_agent("session-123")
+        assert result is True
+        assert "session-123" not in agent_service.agents
+
+    def test_remove_nonexistent_agent(self, agent_service):
+        """Test removing non-existent agent returns False"""
+        result = agent_service.remove_agent("nonexistent")
+        assert result is False
+
     def test_process_hook_event_with_file_tool(self, agent_service, sample_layout):
         """Test processing hook event with file operation"""
         agent_service.set_terrain_layout(sample_layout)
@@ -224,16 +255,17 @@ class TestAgentService:
             cwd="/test"
         )
 
-        agent_event = agent_service.process_hook_event(event)
+        message_type, message_data = agent_service.process_hook_event(event)
 
-        assert agent_event is not None
-        assert agent_event.agent_id == "session-123"
-        assert agent_event.event_type == "move"
-        assert agent_event.target_path == "/test/src/index.ts"
-        assert agent_event.target_position is not None
-        assert agent_event.target_position.x == 12.5
-        assert agent_event.thought == "Reading index.ts"
-        assert agent_event.tool_name == "Read"
+        assert message_type == "agent_event"
+        assert message_data is not None
+        assert message_data["agent_id"] == "session-123"
+        assert message_data["event_type"] == "move"
+        assert message_data["target_path"] == "/test/src/index.ts"
+        assert message_data["target_position"] is not None
+        assert message_data["target_position"]["x"] == 12.5
+        assert message_data["thought"] == "Reading index.ts"
+        assert message_data["tool_name"] == "Read"
 
     def test_process_hook_event_with_bash_tool(self, agent_service):
         """Test processing hook event with Bash tool (no file)"""
@@ -245,15 +277,16 @@ class TestAgentService:
             cwd="/test"
         )
 
-        agent_event = agent_service.process_hook_event(event)
+        message_type, message_data = agent_service.process_hook_event(event)
 
-        assert agent_event is not None
-        assert agent_event.agent_id == "session-456"
-        assert agent_event.event_type == "think"
-        assert agent_event.target_path is None
-        assert agent_event.target_position is None
-        assert agent_event.thought == "Running: npm test"
-        assert agent_event.tool_name == "Bash"
+        assert message_type == "agent_event"
+        assert message_data is not None
+        assert message_data["agent_id"] == "session-456"
+        assert message_data["event_type"] == "think"
+        assert message_data["target_path"] is None
+        assert message_data["target_position"] is None
+        assert message_data["thought"] == "Running: npm test"
+        assert message_data["tool_name"] == "Bash"
 
     def test_process_hook_event_unknown_file(self, agent_service, sample_layout):
         """Test processing event with unknown file path"""
@@ -267,13 +300,14 @@ class TestAgentService:
             cwd="/test"
         )
 
-        agent_event = agent_service.process_hook_event(event)
+        message_type, message_data = agent_service.process_hook_event(event)
 
         # Agent should stay in place for unknown files
-        assert agent_event is not None
-        assert agent_event.event_type == "think"
-        assert agent_event.target_position is None
-        assert agent_event.thought == "Reading file.ts"
+        assert message_type == "agent_event"
+        assert message_data is not None
+        assert message_data["event_type"] == "think"
+        assert message_data["target_position"] is None
+        assert message_data["thought"] == "Reading file.ts"
 
     def test_process_hook_event_updates_agent_state(self, agent_service, sample_layout):
         """Test that processing event updates agent state"""
@@ -322,3 +356,91 @@ class TestAgentService:
         assert "session-2" in agent_service.agents
         assert agent_service.agents["session-1"].thought == "Running: test1"
         assert agent_service.agents["session-2"].thought == "Running: test2"
+
+    def test_session_start_event(self, agent_service):
+        """Test SessionStart event creates agent at origin"""
+        event = HookEvent(
+            session_id="session-start",
+            hook_event_name="SessionStart",
+            cwd="/test"
+        )
+
+        message_type, message_data = agent_service.process_hook_event(event)
+
+        assert message_type == "agent_spawn"
+        assert message_data["agent_id"] == "session-start"
+        assert message_data["position"]["x"] == 0.0
+        assert message_data["position"]["y"] == 0.0
+        assert message_data["position"]["z"] == 0.0
+        assert "session-start" in agent_service.agents
+
+    def test_session_end_event(self, agent_service):
+        """Test SessionEnd event removes agent"""
+        # Create agent first
+        agent_service.get_or_create_agent("session-end")
+
+        event = HookEvent(
+            session_id="session-end",
+            hook_event_name="SessionEnd",
+            cwd="/test"
+        )
+
+        message_type, message_data = agent_service.process_hook_event(event)
+
+        assert message_type == "agent_despawn"
+        assert message_data["agent_id"] == "session-end"
+        assert "session-end" not in agent_service.agents
+
+    def test_stop_event(self, agent_service):
+        """Test Stop event also removes agent"""
+        agent_service.get_or_create_agent("session-stop")
+
+        event = HookEvent(
+            session_id="session-stop",
+            hook_event_name="Stop",
+            cwd="/test"
+        )
+
+        message_type, message_data = agent_service.process_hook_event(event)
+
+        assert message_type == "agent_despawn"
+        assert "session-stop" not in agent_service.agents
+
+    def test_post_tool_use_event(self, agent_service):
+        """Test PostToolUse event marks tool complete"""
+        # Create agent and do pre-tool use first
+        event_pre = HookEvent(
+            session_id="session-post",
+            hook_event_name="PreToolUse",
+            tool_name="Read",
+            tool_input={"file_path": "/test/file.ts"},
+            cwd="/test"
+        )
+        agent_service.process_hook_event(event_pre)
+
+        # Now send PostToolUse
+        event_post = HookEvent(
+            session_id="session-post",
+            hook_event_name="PostToolUse",
+            tool_name="Read",
+            cwd="/test"
+        )
+
+        message_type, message_data = agent_service.process_hook_event(event_post)
+
+        assert message_type == "agent_event"
+        assert message_data["event_type"] == "idle"
+        assert message_data["tool_name"] == "Read"
+
+    def test_unknown_event_ignored(self, agent_service):
+        """Test unknown event types are ignored"""
+        event = HookEvent(
+            session_id="session-unknown",
+            hook_event_name="UnknownEvent",
+            cwd="/test"
+        )
+
+        message_type, message_data = agent_service.process_hook_event(event)
+
+        assert message_type is None
+        assert message_data is None

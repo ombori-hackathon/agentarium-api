@@ -6,11 +6,14 @@ for WebSocket broadcast to clients.
 """
 
 import time
-from typing import Dict, Optional
+import logging
+from typing import Dict, Optional, Tuple
 from pathlib import Path
 
-from app.schemas.events import HookEvent, AgentEvent
+from app.schemas.events import HookEvent, AgentEvent, AgentSpawn, AgentDespawn
 from app.schemas.filesystem import Position, FilesystemLayout
+
+logger = logging.getLogger(__name__)
 
 
 class AgentState:
@@ -43,7 +46,19 @@ def extract_file_path(tool_name: str, tool_input: Dict) -> Optional[str]:
     if not tool_input:
         return None
 
-    return tool_input.get("file_path")
+    # Read, Write, Edit tools use file_path
+    if tool_name in ("Read", "Write", "Edit"):
+        return tool_input.get("file_path")
+
+    # Grep and Glob tools use path
+    if tool_name in ("Grep", "Glob"):
+        return tool_input.get("path")
+
+    # Bash tool - best effort parsing (skip for MVP)
+    # We could parse commands like "cat file.txt" but this is complex
+    # For now, return None and agent will stay in place
+
+    return None
 
 
 def generate_thought(tool_name: str, tool_input: Dict) -> str:
@@ -157,23 +172,116 @@ class AgentService:
 
         return self.agents[session_id]
 
-    def process_hook_event(self, event: HookEvent) -> Optional[AgentEvent]:
+    def remove_agent(self, session_id: str) -> bool:
         """
-        Process a hook event and generate an agent event.
+        Remove agent state for a session.
 
-        This method:
-        1. Gets or creates agent state for the session
-        2. Extracts file path from tool input (if present)
-        3. Looks up 3D coordinates for the file
-        4. Generates thought text
-        5. Updates agent state
-        6. Creates and returns AgentEvent for broadcast
+        Args:
+            session_id: Session to remove
+
+        Returns:
+            True if agent was removed, False if not found
+        """
+        if session_id in self.agents:
+            del self.agents[session_id]
+            return True
+        return False
+
+    def process_hook_event(self, event: HookEvent) -> Tuple[str, Optional[dict]]:
+        """
+        Process a hook event and generate WebSocket message.
+
+        This method handles the full session lifecycle:
+        - SessionStart: spawn agent at origin
+        - PreToolUse: move agent to file location
+        - PostToolUse: mark tool complete
+        - SessionEnd/Stop: despawn agent
 
         Args:
             event: Hook event from Claude
 
         Returns:
-            AgentEvent for WebSocket broadcast, or None if event should be ignored
+            Tuple of (message_type, message_data) for WebSocket broadcast.
+            Returns (None, None) if event should be ignored.
+        """
+        start_time = time.time()
+        logger.info(f"Event received: {event.session_id} - {event.hook_event_name} at {start_time}")
+
+        # Handle session lifecycle events
+        if event.hook_event_name == "SessionStart":
+            return self._handle_session_start(event, start_time)
+        elif event.hook_event_name in ("SessionEnd", "Stop"):
+            return self._handle_session_end(event, start_time)
+        elif event.hook_event_name == "PreToolUse":
+            return self._handle_pre_tool_use(event, start_time)
+        elif event.hook_event_name == "PostToolUse":
+            return self._handle_post_tool_use(event, start_time)
+        else:
+            logger.debug(f"Ignoring event: {event.hook_event_name}")
+            return None, None
+
+    def _handle_session_start(self, event: HookEvent, start_time: float) -> Tuple[str, dict]:
+        """
+        Handle SessionStart event - spawn agent at origin.
+
+        Args:
+            event: Hook event
+            start_time: Timestamp when event was received
+
+        Returns:
+            Tuple of (message_type, message_data)
+        """
+        # Create new agent at origin
+        agent = self.get_or_create_agent(event.session_id)
+        agent.position = Position(x=0.0, y=0.0, z=0.0)
+
+        spawn_event = AgentSpawn(
+            agent_id=event.session_id,
+            position=agent.position,
+            color="#e07850"
+        )
+
+        process_time = (time.time() - start_time) * 1000  # ms
+        logger.info(f"SessionStart processed in {process_time:.2f}ms for {event.session_id}")
+
+        return "agent_spawn", spawn_event.model_dump()
+
+    def _handle_session_end(self, event: HookEvent, start_time: float) -> Tuple[str, dict]:
+        """
+        Handle SessionEnd/Stop event - despawn agent.
+
+        Args:
+            event: Hook event
+            start_time: Timestamp when event was received
+
+        Returns:
+            Tuple of (message_type, message_data)
+        """
+        # Remove agent state
+        removed = self.remove_agent(event.session_id)
+
+        if not removed:
+            logger.warning(f"Attempted to remove non-existent agent: {event.session_id}")
+
+        despawn_event = AgentDespawn(
+            agent_id=event.session_id
+        )
+
+        process_time = (time.time() - start_time) * 1000  # ms
+        logger.info(f"SessionEnd processed in {process_time:.2f}ms for {event.session_id}")
+
+        return "agent_despawn", despawn_event.model_dump()
+
+    def _handle_pre_tool_use(self, event: HookEvent, start_time: float) -> Tuple[str, Optional[dict]]:
+        """
+        Handle PreToolUse event - move agent to file location.
+
+        Args:
+            event: Hook event
+            start_time: Timestamp when event was received
+
+        Returns:
+            Tuple of (message_type, message_data)
         """
         # Get or create agent state
         agent = self.get_or_create_agent(event.session_id)
@@ -187,6 +295,10 @@ class AgentService:
         target_position = None
         if file_path:
             target_position = self.get_file_position(file_path)
+            if target_position:
+                logger.debug(f"Found position for {file_path}: {target_position}")
+            else:
+                logger.debug(f"Unknown file path: {file_path} (agent stays in place)")
 
         # Generate thought text
         thought = None
@@ -199,7 +311,7 @@ class AgentService:
             # Update agent position to target
             agent.position = target_position
         else:
-            # No movement - just thinking
+            # No movement - just thinking (unknown file or non-file tool)
             event_type = "think"
 
         # Update agent state
@@ -218,7 +330,44 @@ class AgentService:
             timestamp=int(time.time() * 1000)  # milliseconds
         )
 
-        return agent_event
+        process_time = (time.time() - start_time) * 1000  # ms
+        logger.info(f"PreToolUse processed in {process_time:.2f}ms for {event.session_id}")
+
+        return "agent_event", agent_event.model_dump()
+
+    def _handle_post_tool_use(self, event: HookEvent, start_time: float) -> Tuple[str, Optional[dict]]:
+        """
+        Handle PostToolUse event - mark tool complete.
+
+        Args:
+            event: Hook event
+            start_time: Timestamp when event was received
+
+        Returns:
+            Tuple of (message_type, message_data)
+        """
+        # Get agent state
+        if event.session_id not in self.agents:
+            logger.warning(f"PostToolUse for unknown session: {event.session_id}")
+            return None, None
+
+        agent = self.agents[event.session_id]
+
+        # Create completion event
+        agent_event = AgentEvent(
+            agent_id=event.session_id,
+            event_type="idle",
+            target_path=agent.target_path,
+            target_position=None,
+            thought=None,
+            tool_name=event.tool_name,
+            timestamp=int(time.time() * 1000)
+        )
+
+        process_time = (time.time() - start_time) * 1000  # ms
+        logger.info(f"PostToolUse processed in {process_time:.2f}ms for {event.session_id}")
+
+        return "agent_event", agent_event.model_dump()
 
 
 # Global agent service instance
