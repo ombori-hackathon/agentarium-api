@@ -1,5 +1,7 @@
-from typing import Any, Dict
+from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel
+
+from app.schemas.filesystem import Position
 
 
 class HookEvent(BaseModel):
@@ -13,11 +15,14 @@ class HookEvent(BaseModel):
 
 class AgentEvent(BaseModel):
     """Agent event data for WebSocket broadcast"""
-    session_id: str
-    event_type: str  # hook_event_name
-    tool_name: str | None = None
-    tool_input: Dict[str, Any] | None = None
-    cwd: str | None = None
+    type: Literal["agent_event"] = "agent_event"
+    agent_id: str
+    event_type: Literal["move", "read", "write", "think", "idle"]
+    target_path: Optional[str] = None
+    target_position: Optional[Position] = None
+    thought: Optional[str] = None
+    tool_name: Optional[str] = None
+    timestamp: int
 
 
 class EventResponse(BaseModel):
@@ -27,11 +32,13 @@ class EventResponse(BaseModel):
 
 class AgentSpawn(BaseModel):
     """Agent spawn event"""
+    type: Literal["agent_spawn"] = "agent_spawn"
     agent_id: str
-    position: Dict[str, float]  # {"x": 0.0, "y": 0.0, "z": 0.0}
-    agent_type: str = "default"
+    position: Position
+    color: str = "#e07850"
 
 
 class AgentDespawn(BaseModel):
     """Agent despawn event"""
+    type: Literal["agent_despawn"] = "agent_despawn"
     agent_id: str

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
-from app.schemas.events import HookEvent, EventResponse, AgentEvent
+from app.schemas.events import HookEvent, EventResponse
+from app.services.agent import agent_service
 from app.websocket import manager
 
 router = APIRouter(prefix="/api/events", tags=["events"])
@@ -11,16 +12,11 @@ async def receive_event(event: HookEvent):
     """
     Receive hook events from Claude and broadcast to WebSocket clients
     """
-    # Convert hook event to agent event for broadcast
-    agent_event = AgentEvent(
-        session_id=event.session_id,
-        event_type=event.hook_event_name,
-        tool_name=event.tool_name,
-        tool_input=event.tool_input,
-        cwd=event.cwd
-    )
+    # Process hook event through agent service
+    agent_event = agent_service.process_hook_event(event)
 
-    # Broadcast to all connected WebSocket clients
-    await manager.broadcast("agent_event", agent_event.model_dump())
+    # Broadcast agent event to all connected WebSocket clients
+    if agent_event:
+        await manager.broadcast("agent_event", agent_event.model_dump())
 
     return EventResponse(status="ok")
