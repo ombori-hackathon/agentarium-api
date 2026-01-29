@@ -316,14 +316,14 @@ class AgentService:
 
     def _handle_session_start(self, event: HookEvent, start_time: float) -> List[Tuple[str, dict]]:
         """
-        Handle SessionStart event - auto-load terrain and spawn agent.
+        Handle SessionStart event - spawn agent first, then load terrain.
 
         This method:
-        1. Broadcasts terrain_loading event
-        2. Scans filesystem at cwd (if provided and different from current)
-        3. Broadcasts filesystem layout
-        4. Broadcasts terrain_complete event
-        5. Spawns agent at origin
+        1. Spawns agent at origin (so user sees agent immediately)
+        2. Broadcasts terrain_loading event
+        3. Scans filesystem at cwd (if provided and different from current)
+        4. Broadcasts filesystem layout
+        5. Broadcasts terrain_complete event
 
         Args:
             event: Hook event
@@ -335,11 +335,22 @@ class AgentService:
         messages: List[Tuple[str, dict]] = []
         cwd = event.cwd
 
-        # Auto-load terrain if cwd is provided
+        # 1. Create and spawn agent at origin FIRST (so user sees agent immediately)
+        agent = self.get_or_create_agent(event.session_id)
+        agent.position = Position(x=0.0, y=0.0, z=0.0)
+
+        spawn_event = AgentSpawn(
+            agent_id=event.session_id,
+            position=agent.position,
+            color="#e07850"
+        )
+        messages.append(("agent_spawn", spawn_event.model_dump()))
+
+        # 2. Auto-load terrain if cwd is provided (world builds around agent)
         if cwd and cwd != self.current_cwd:
             logger.info(f"SessionStart with new cwd: {cwd}")
 
-            # 1. Broadcast terrain_loading
+            # Broadcast terrain_loading
             loading_event = TerrainLoading(
                 session_id=event.session_id,
                 cwd=cwd,
@@ -347,7 +358,7 @@ class AgentService:
             )
             messages.append(("terrain_loading", loading_event.model_dump()))
 
-            # 2. Scan filesystem and broadcast layout
+            # Scan filesystem and broadcast layout
             try:
                 layout = scan_filesystem(cwd)
                 self.set_terrain_layout(layout)
@@ -356,7 +367,7 @@ class AgentService:
                 # Broadcast filesystem layout
                 messages.append(("filesystem", layout.model_dump()))
 
-                # 3. Broadcast terrain_complete
+                # Broadcast terrain_complete
                 complete_event = TerrainComplete(
                     session_id=event.session_id,
                     folder_count=len(layout.folders),
@@ -368,18 +379,7 @@ class AgentService:
 
             except Exception as e:
                 logger.error(f"Failed to scan filesystem at {cwd}: {e}")
-                # Still spawn agent even if terrain loading fails
-
-        # Create new agent at origin
-        agent = self.get_or_create_agent(event.session_id)
-        agent.position = Position(x=0.0, y=0.0, z=0.0)
-
-        spawn_event = AgentSpawn(
-            agent_id=event.session_id,
-            position=agent.position,
-            color="#e07850"
-        )
-        messages.append(("agent_spawn", spawn_event.model_dump()))
+                # Agent already spawned, terrain loading failed but that's ok
 
         process_time = (time.time() - start_time) * 1000  # ms
         logger.info(f"SessionStart processed in {process_time:.2f}ms for {event.session_id}")
