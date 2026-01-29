@@ -1,5 +1,13 @@
 from datetime import datetime
 from pydantic import BaseModel
+from typing import Optional
+
+
+class Position(BaseModel):
+    """3D position in space"""
+    x: float
+    y: float
+    z: float
 
 
 class Folder(BaseModel):
@@ -8,6 +16,8 @@ class Folder(BaseModel):
     name: str
     depth: int
     file_count: int
+    position: Optional[Position] = None
+    height: Optional[float] = None
 
 
 class File(BaseModel):
@@ -16,6 +26,7 @@ class File(BaseModel):
     name: str
     folder: str
     size: int
+    position: Optional[Position] = None
 
 
 class FilesystemLayout(BaseModel):
