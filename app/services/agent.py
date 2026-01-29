@@ -5,15 +5,104 @@ This service tracks agent state, processes hook events, and generates agent even
 for WebSocket broadcast to clients.
 """
 
+import os
 import time
 import logging
-from typing import Dict, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
-from app.schemas.events import HookEvent, AgentEvent, AgentSpawn, AgentDespawn
-from app.schemas.filesystem import Position, FilesystemLayout
+from app.schemas.events import (
+    HookEvent, AgentEvent, AgentSpawn, AgentDespawn,
+    TerrainLoading, TerrainComplete
+)
+from app.schemas.filesystem import Position, FilesystemLayout, Folder, File
+from app.services.terrain import calculate_positions_for_layout
 
 logger = logging.getLogger(__name__)
+
+# Directories to exclude from filesystem scanning for performance
+EXCLUDED_DIRS = {
+    # Package managers
+    'node_modules', '.pnpm', 'bower_components', 'vendor', 'packages',
+    # Version control
+    '.git', '.svn', '.hg',
+    # Build outputs
+    'dist', 'build', 'out', 'target', '.next', '.nuxt', '.output',
+    # Caches
+    '.cache', '__pycache__', '.pytest_cache', '.mypy_cache', '.tox',
+    # Virtual environments
+    '.venv', 'venv', 'env', '.env',
+    # IDE/Editor
+    '.idea', '.vscode',
+    # Logs/temp
+    'logs', 'tmp', 'temp', '.tmp',
+    # Coverage/reports
+    'coverage', '.nyc_output', 'htmlcov',
+}
+
+MAX_DEPTH = 5
+
+
+def scan_filesystem(path: str) -> FilesystemLayout:
+    """
+    Scan a directory and return its structure with positions.
+
+    Args:
+        path: Root path to scan
+
+    Returns:
+        FilesystemLayout with positions calculated
+    """
+    root_path = Path(path)
+
+    if not root_path.exists() or not root_path.is_dir():
+        raise ValueError(f"Invalid directory: {path}")
+
+    folders: List[Folder] = []
+    files: List[File] = []
+    root_depth = len(root_path.parts)
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        current_path = Path(dirpath)
+        current_depth = len(current_path.parts) - root_depth
+
+        # Filter excluded directories
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+
+        if current_depth >= MAX_DEPTH:
+            dirnames.clear()
+
+        if current_path != root_path:
+            file_count = len(filenames)
+            folders.append(Folder(
+                path=str(current_path),
+                name=current_path.name,
+                depth=current_depth,
+                file_count=file_count
+            ))
+
+        for filename in filenames:
+            file_path = current_path / filename
+            try:
+                file_size = file_path.stat().st_size
+                files.append(File(
+                    path=str(file_path),
+                    name=filename,
+                    folder=str(current_path),
+                    size=file_size
+                ))
+            except (OSError, PermissionError):
+                continue
+
+    layout = FilesystemLayout(
+        root=str(root_path),
+        folders=folders,
+        files=files,
+        scanned_at=datetime.now(timezone.utc)
+    )
+
+    return calculate_positions_for_layout(layout)
 
 
 class AgentState:
@@ -122,11 +211,13 @@ class AgentService:
     - Maintains terrain layout for position lookups
     - Processes hook events and generates agent events
     - Maps file paths to 3D coordinates
+    - Auto-loads terrain on SessionStart based on cwd
     """
 
     def __init__(self):
         self.agents: Dict[str, AgentState] = {}
         self.terrain_layout: Optional[FilesystemLayout] = None
+        self.current_cwd: Optional[str] = None
 
     def set_terrain_layout(self, layout: FilesystemLayout):
         """
@@ -187,12 +278,12 @@ class AgentService:
             return True
         return False
 
-    def process_hook_event(self, event: HookEvent) -> Tuple[str, Optional[dict]]:
+    def process_hook_event(self, event: HookEvent) -> List[Tuple[str, Optional[dict]]]:
         """
-        Process a hook event and generate WebSocket message.
+        Process a hook event and generate WebSocket messages.
 
         This method handles the full session lifecycle:
-        - SessionStart: spawn agent at origin
+        - SessionStart: scan filesystem, broadcast terrain_loading, filesystem, terrain_complete, agent_spawn
         - PreToolUse: move agent to file location
         - PostToolUse: mark tool complete
         - SessionEnd/Stop: despawn agent
@@ -201,8 +292,8 @@ class AgentService:
             event: Hook event from Claude
 
         Returns:
-            Tuple of (message_type, message_data) for WebSocket broadcast.
-            Returns (None, None) if event should be ignored.
+            List of (message_type, message_data) tuples for WebSocket broadcast.
+            Returns empty list if event should be ignored.
         """
         start_time = time.time()
         logger.info(f"Event received: {event.session_id} - {event.hook_event_name} at {start_time}")
@@ -211,26 +302,74 @@ class AgentService:
         if event.hook_event_name == "SessionStart":
             return self._handle_session_start(event, start_time)
         elif event.hook_event_name in ("SessionEnd", "Stop"):
-            return self._handle_session_end(event, start_time)
+            result = self._handle_session_end(event, start_time)
+            return [result] if result[0] else []
         elif event.hook_event_name == "PreToolUse":
-            return self._handle_pre_tool_use(event, start_time)
+            result = self._handle_pre_tool_use(event, start_time)
+            return [result] if result[0] else []
         elif event.hook_event_name == "PostToolUse":
-            return self._handle_post_tool_use(event, start_time)
+            result = self._handle_post_tool_use(event, start_time)
+            return [result] if result[0] else []
         else:
             logger.debug(f"Ignoring event: {event.hook_event_name}")
-            return None, None
+            return []
 
-    def _handle_session_start(self, event: HookEvent, start_time: float) -> Tuple[str, dict]:
+    def _handle_session_start(self, event: HookEvent, start_time: float) -> List[Tuple[str, dict]]:
         """
-        Handle SessionStart event - spawn agent at origin.
+        Handle SessionStart event - auto-load terrain and spawn agent.
+
+        This method:
+        1. Broadcasts terrain_loading event
+        2. Scans filesystem at cwd (if provided and different from current)
+        3. Broadcasts filesystem layout
+        4. Broadcasts terrain_complete event
+        5. Spawns agent at origin
 
         Args:
             event: Hook event
             start_time: Timestamp when event was received
 
         Returns:
-            Tuple of (message_type, message_data)
+            List of (message_type, message_data) tuples
         """
+        messages: List[Tuple[str, dict]] = []
+        cwd = event.cwd
+
+        # Auto-load terrain if cwd is provided
+        if cwd and cwd != self.current_cwd:
+            logger.info(f"SessionStart with new cwd: {cwd}")
+
+            # 1. Broadcast terrain_loading
+            loading_event = TerrainLoading(
+                session_id=event.session_id,
+                cwd=cwd,
+                message="Creating world..."
+            )
+            messages.append(("terrain_loading", loading_event.model_dump()))
+
+            # 2. Scan filesystem and broadcast layout
+            try:
+                layout = scan_filesystem(cwd)
+                self.set_terrain_layout(layout)
+                self.current_cwd = cwd
+
+                # Broadcast filesystem layout
+                messages.append(("filesystem", layout.model_dump()))
+
+                # 3. Broadcast terrain_complete
+                complete_event = TerrainComplete(
+                    session_id=event.session_id,
+                    folder_count=len(layout.folders),
+                    file_count=len(layout.files)
+                )
+                messages.append(("terrain_complete", complete_event.model_dump()))
+
+                logger.info(f"Terrain loaded: {len(layout.folders)} folders, {len(layout.files)} files")
+
+            except Exception as e:
+                logger.error(f"Failed to scan filesystem at {cwd}: {e}")
+                # Still spawn agent even if terrain loading fails
+
         # Create new agent at origin
         agent = self.get_or_create_agent(event.session_id)
         agent.position = Position(x=0.0, y=0.0, z=0.0)
@@ -240,11 +379,12 @@ class AgentService:
             position=agent.position,
             color="#e07850"
         )
+        messages.append(("agent_spawn", spawn_event.model_dump()))
 
         process_time = (time.time() - start_time) * 1000  # ms
         logger.info(f"SessionStart processed in {process_time:.2f}ms for {event.session_id}")
 
-        return "agent_spawn", spawn_event.model_dump()
+        return messages
 
     def _handle_session_end(self, event: HookEvent, start_time: float) -> Tuple[str, dict]:
         """

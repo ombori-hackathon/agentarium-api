@@ -60,9 +60,11 @@ def sample_layout():
 def setup_agent_service(sample_layout):
     """Set up agent service with terrain layout before each test"""
     agent_service.set_terrain_layout(sample_layout)
+    agent_service.current_cwd = "/test"  # Set cwd to match test events so terrain isn't reloaded
     agent_service.agents.clear()  # Clear any existing agents
     yield
     agent_service.agents.clear()  # Clean up after test
+    agent_service.current_cwd = None  # Reset cwd
 
 
 class TestSessionLifecycle:
