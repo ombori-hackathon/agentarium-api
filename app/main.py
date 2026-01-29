@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.db import Base, engine, get_db
 from app.models.item import Item as ItemModel
 from app.schemas.item import Item as ItemSchema
+from app.websocket import manager
+from app.routers import events, filesystem
 
 
 def seed_database(db: Session):
@@ -48,6 +50,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register routers
+app.include_router(events.router)
+app.include_router(filesystem.router)
+
 
 @app.get("/")
 async def root():
@@ -72,3 +78,16 @@ async def get_item(item_id: int, db: Session = Depends(get_db)):
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     return item
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time updates"""
+    await manager.connect(websocket)
+    try:
+        # Keep connection alive and listen for messages
+        while True:
+            # We don't expect client to send messages, but we need to keep connection open
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
