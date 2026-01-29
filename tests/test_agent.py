@@ -486,7 +486,7 @@ class TestSessionStartWithTerrain:
             yield tmpdir
 
     def test_session_start_with_cwd_loads_terrain(self, temp_project):
-        """Test SessionStart with cwd triggers terrain loading"""
+        """Test SessionStart with cwd spawns agent first, then loads terrain"""
         agent_service = AgentService()
 
         event = HookEvent(
@@ -497,23 +497,24 @@ class TestSessionStartWithTerrain:
 
         messages = agent_service.process_hook_event(event)
 
-        # Should have: terrain_loading, filesystem, terrain_complete, agent_spawn
+        # Should have: agent_spawn, terrain_loading, filesystem, terrain_complete
+        # Agent spawns FIRST so user sees it immediately, then world builds around it
         assert len(messages) == 4
 
         # Check message types in order
-        assert messages[0][0] == "terrain_loading"
-        assert messages[0][1]["cwd"] == temp_project
-        assert messages[0][1]["message"] == "Creating world..."
+        assert messages[0][0] == "agent_spawn"
+        assert messages[0][1]["agent_id"] == "session-terrain"
 
-        assert messages[1][0] == "filesystem"
-        assert messages[1][1]["root"] == temp_project
+        assert messages[1][0] == "terrain_loading"
+        assert messages[1][1]["cwd"] == temp_project
+        assert messages[1][1]["message"] == "Creating world..."
 
-        assert messages[2][0] == "terrain_complete"
-        assert messages[2][1]["folder_count"] == 1  # src folder
-        assert messages[2][1]["file_count"] == 3  # README.md, index.ts, app.ts
+        assert messages[2][0] == "filesystem"
+        assert messages[2][1]["root"] == temp_project
 
-        assert messages[3][0] == "agent_spawn"
-        assert messages[3][1]["agent_id"] == "session-terrain"
+        assert messages[3][0] == "terrain_complete"
+        assert messages[3][1]["folder_count"] == 1  # src folder
+        assert messages[3][1]["file_count"] == 3  # README.md, index.ts, app.ts
 
     def test_session_start_sets_current_cwd(self, temp_project):
         """Test SessionStart updates current_cwd"""
@@ -578,10 +579,11 @@ class TestSessionStartWithTerrain:
             )
             messages2 = agent_service.process_hook_event(event2)
 
-            # Should have full terrain loading for new cwd
+            # Should have: agent_spawn first, then full terrain loading for new cwd
             assert len(messages2) == 4
-            assert messages2[0][0] == "terrain_loading"
-            assert messages2[1][0] == "filesystem"
+            assert messages2[0][0] == "agent_spawn"
+            assert messages2[1][0] == "terrain_loading"
+            assert messages2[2][0] == "filesystem"
             assert agent_service.current_cwd == tmpdir2
 
     def test_session_start_invalid_cwd_still_spawns_agent(self, agent_service):
